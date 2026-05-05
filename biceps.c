@@ -1,67 +1,105 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
-#include <readline/readline.h>
+#include <signal.h>
+
+/* Inclusion des modules des TP précédents pour la gestion des commandes (gescom) 
+   et du cœur du protocole BEUIP (creme) */
+#include "gescom.h"
 #include "creme.h"
 
-int exec_beuip(int argc, char **argv) {
-    if (argc < 2) return -1;
+/* Fonction de sortie propre : libère la mémoire et arrête les services */
+static int Sortie(int n, char **p) {
+    (void)n;
+    (void)p;
+    
+    /* Nettoyage du protocole creme (threads, listes) et des mots du shell */
+    creme_cleanup(); 
+    freeMots();
+    
+    printf("Arrêt du programme biceps\n");
+    exit(0);
+}
 
-    if (strcmp(argv[1], "start") == 0 && argc == 3) {
-        return creme_beuip_start(argv[2]);
-    } 
-    else if (strcmp(argv[1], "stop") == 0) {
-        return creme_beuip_stop();
-    } 
-    else if (strcmp(argv[1], "list") == 0) {
-        creme_list();
-        return 0;
-    } 
-    // Consigne 5 et 6 : message <user|all> <msg>
-    else if (strcmp(argv[1], "message") == 0 && argc >= 4) {
-        char msg_complet[512] = "";
-        for (int i = 3; i < argc; i++) {
-            strcat(msg_complet, argv[i]);
-            if (i < argc - 1) strcat(msg_complet, " ");
-        }
-        // Simulation de l'envoi pour le script
-        printf("Envoi de '%s' à '%s'\n", msg_complet, argv[2]);
-        return 0; 
+/* Gestionnaire de signal pour ignorer le comportement par défaut de CTRL+C */
+static void handle_sigint(int sig) {
+    (void)sig;
+    write(STDOUT_FILENO, "\n", 1);
+}
+
+/* Enregistrement des commandes internes du shell développées aux TP1 et TP2 */
+static void majComInt(void) {
+    ajouteCom("exit", Sortie);
+    ajouteCom("cd", ChangeDir);   /* Commande système TP1 */
+    ajouteCom("pwd", PrintDir);  /* Commande système TP1 */
+    ajouteCom("vers", Version);
+    ajouteCom("beuip", BeuipCmd); /* Point d'entrée pour les commandes du TP3 */
+}
+
+/* Construction dynamique du prompt type shell (user@machine$) */
+static char *build_prompt(void) {
+    char hostname[256];
+    char *user = getenv("USER");
+    char symbol = (geteuid() == 0) ? '#' : '$'; /* Différenciation root/user */
+
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        strcpy(hostname, "machine");
     }
-    return -1;
+
+    if (user == NULL) {
+        user = "user";
+    }
+
+    size_t size = strlen(user) + strlen(hostname) + 4;
+    char *prompt = malloc(size);
+    if (prompt == NULL) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+
+    snprintf(prompt, size, "%s@%s%c ", user, hostname, symbol);
+    return prompt;
 }
 
 int main(void) {
-    char *ligne;
-    printf("Biceps v3.0 - Tapez 'beuip start [pseudo]' pour commencer.\n");
-    
-    while ((ligne = readline("biceps> "))) {
-        if (strlen(ligne) > 0) {
-            int argc = 0;
-            char *argv[20];
-            char *temp = strdup(ligne);
-            char *token = strtok(temp, " ");
-            
-            while (token && argc < 20) {
-                argv[argc++] = token;
-                token = strtok(NULL, " ");
-            }
-            
-            if (argc > 0) {
-                if (strcmp(argv[0], "beuip") == 0) {
-                    exec_beuip(argc, argv);
-                } else if (strcmp(argv[0], "exit") == 0) {
-                    creme_beuip_stop();
-                    free(temp);
-                    free(ligne);
-                    return 0;
-                }
-            }
-            free(temp);
+    char buffer[1024];
+    char *prompt_str;
+
+    /* Configuration des signaux et initialisation des commandes */
+    signal(SIGINT, handle_sigint);
+    majComInt();
+
+    /* Boucle principale de l'interpréteur de commandes */
+    while (1) {
+        /* Affichage du prompt utilisateur */
+        prompt_str = build_prompt();
+        printf("%s", prompt_str);
+        fflush(stdout);
+
+        /* Lecture de l'entrée utilisateur (gestion du CTRL+D) */
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
+            free(prompt_str);
+            Sortie(0, NULL);
         }
-        free(ligne);
+
+        free(prompt_str);
+
+        /* Suppression du caractère de nouvelle ligne */
+        buffer[strcspn(buffer, "\n")] = '\0';
+
+        /* Ignore les entrées vides */
+        if (buffer[0] == '\0') {
+            continue;
+        }
+
+        /* Analyse syntaxique de la commande (héritage TP1/TP2) */
+        int count = analyseCom(buffer);
+        
+        /* Priorité aux commandes internes, sinon exécution comme commande système externe */
+        if (count > 0 && !execComInt(count, Mots)) {
+            execComExt(Mots);
+        }
     }
-    // Assure le stop même sur CTRL+D
-    creme_beuip_stop();
     return 0;
 }
